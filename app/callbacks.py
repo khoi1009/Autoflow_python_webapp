@@ -142,7 +142,9 @@ def register_callbacks(app):
 
                     # Calculate timestamp in milliseconds for JS
                     # Force UTC to prevent browser timezone conversion issues
-                    min_date_ts = min_date.tz_localize(None).tz_localize("UTC").timestamp() * 1000
+                    min_date_ts = (
+                        min_date.tz_localize(None).tz_localize("UTC").timestamp() * 1000
+                    )
 
                     # Calculate initial window end time (1 hour from start)
                     initial_window_hours = 1.0
@@ -467,30 +469,22 @@ def register_callbacks(app):
     # Clientside callback for slider scroll buttons
     app.clientside_callback(
         ClientsideFunction(namespace="clientside", function_name="scrollSlider"),
-        Output("time-slider", "value"),
+        Output("time-slider", "value", allow_duplicate=True),
         [Input("scroll-left", "n_clicks"), Input("scroll-right", "n_clicks")],
         [
             State("time-slider", "value"),
             State("time-slider", "max"),
             State("window-size-input", "value"),
         ],
+        prevent_initial_call=True,
     )
 
     # ========================================
-    # Navigation Callbacks
+    # Event Navigation (CLIENT-SIDE - INSTANT)
     # ========================================
-    @app.callback(
-        [
-            Output("timeline-chart", "figure", allow_duplicate=True),
-            Output("current-event-index", "data"),
-            Output("nav-remaining-indices", "data"),
-            Output("nav-same-category", "data"),
-            Output("nav-search-direction", "data"),
-            Output("nav-index-for-plotting", "data"),
-            Output("date-from", "value"),
-            Output("date-to", "value"),
-            Output("time-slider", "value", allow_duplicate=True),
-        ],
+    app.clientside_callback(
+        ClientsideFunction(namespace="clientside", function_name="navigateEvent"),
+        Output("time-slider", "value", allow_duplicate=True),
         [
             Input("prev-event-btn", "n_clicks"),
             Input("next-event-btn", "n_clicks"),
@@ -502,155 +496,9 @@ def register_callbacks(app):
             State("time-slider", "value"),
             State("time-slider", "max"),
             State("window-size-input", "value"),
-            State("current-event-index", "data"),
-            State("nav-remaining-indices", "data"),
-            State("nav-same-category", "data"),
-            State("nav-search-direction", "data"),
-            State("nav-index-for-plotting", "data"),
-            State("timeline-chart", "figure"),
         ],
         prevent_initial_call=True,
     )
-    def navigate_event(
-        prev_clicks,
-        next_clicks,
-        category,
-        event_data,
-        metadata,
-        slider_value,
-        slider_max,
-        window_days,
-        current_index,
-        remaining_indices,
-        same_category,
-        search_direction,
-        index_for_plotting,
-        current_figure,
-    ):
-        ctx = callback_context
-        if not ctx.triggered or not event_data or not metadata or not category:
-            return (
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-            )
-
-        trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-
-        df = pd.DataFrame(event_data)
-        df["datetime_start"] = pd.to_datetime(df["datetime_start"])
-
-        min_date = pd.to_datetime(metadata.get("min_date"))
-        window_days = (window_days or 1.0) / 24  # Convert hours to days
-
-        # Get current window position from figure
-        current_window_start = min_date + timedelta(days=slider_value or 0)
-
-        # Filter by category
-        cat_df = df[df["Category"] == category].copy()
-        if cat_df.empty:
-            print(f"DEBUG: No events found for category '{category}'", flush=True)
-            return (
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-            )
-
-        cat_df = cat_df.sort_values("datetime_start").reset_index(drop=True)
-
-        # Determine search direction
-        is_next = trigger_id == "next-event-btn"
-        new_direction = "next" if is_next else "previous"
-
-        print(f"DEBUG: Navigating {new_direction} for category '{category}'", flush=True)
-
-        # Check if we need to rebuild the index list
-        rebuild_list = (
-            same_category != category
-            or search_direction != new_direction
-            or not remaining_indices
-        )
-
-        if rebuild_list:
-            print("DEBUG: Rebuilding index list...", flush=True)
-            # Build list of all events of this category
-            if is_next:
-                # Find events after current window start
-                future_events = cat_df[cat_df["datetime_start"] >= current_window_start]
-                remaining_indices = future_events.index.tolist()
-            else:
-                # Find events before current window start
-                past_events = cat_df[cat_df["datetime_start"] < current_window_start]
-                remaining_indices = past_events.index.tolist()[::-1]  # Reverse for prev
-            
-            print(f"DEBUG: Found {len(remaining_indices)} remaining events", flush=True)
-
-        if not remaining_indices:
-            # No more events in this direction, wrap around
-            print("DEBUG: Wrapping around...", flush=True)
-            if is_next:
-                remaining_indices = cat_df.index.tolist()
-            else:
-                remaining_indices = cat_df.index.tolist()[::-1]
-
-        if not remaining_indices:
-            return (
-                no_update,
-                no_update,
-                [],
-                category,
-                new_direction,
-                [],
-                no_update,
-                no_update,
-                no_update,
-            )
-
-        # Get next event index
-        index_of_searched_event = remaining_indices[0]
-        remaining_indices = remaining_indices[1:]
-
-        # Get event details
-        event_row = cat_df.loc[index_of_searched_event]
-        event_start = event_row["datetime_start"]
-        event_cat = event_row["Category"]
-        
-        print(f"DEBUG: Navigating to event: Time={event_start}, Category={event_cat}", flush=True)
-
-        # Calculate slider position to center the event
-        offset_days = window_days / 2
-        new_slider_days = (event_start - min_date).total_seconds() / 86400 - offset_days
-
-        # Clamp to valid range
-        new_slider_value = max(0, min(slider_max or 100, new_slider_days))
-
-        # We ONLY update the slider value. The client-side callback 'updateTimeline'
-        # will detect the slider change and update the chart + date inputs.
-        # This prevents conflict between server-side Patch and client-side figure update.
-
-        return (
-            no_update,  # timeline-chart (let client-side handle it)
-            index_of_searched_event,
-            remaining_indices,
-            category,
-            new_direction,
-            index_for_plotting,
-            no_update,  # date-from (let client-side handle it)
-            no_update,  # date-to (let client-side handle it)
-            new_slider_value,
-        )
 
     # ========================================
     # Save Project - Open Modal
