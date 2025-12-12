@@ -31,6 +31,9 @@ from .data import (
     invalidate_cache,
 )
 
+# Track the last CSV path that was used to build the chart
+_last_built_csv_path = {"value": None}
+
 
 def register_callbacks(app):
 
@@ -138,7 +141,8 @@ def register_callbacks(app):
                     total_days = (max_date - min_date).total_seconds() / 86400
 
                     # Calculate timestamp in milliseconds for JS
-                    min_date_ts = min_date.timestamp() * 1000
+                    # Force UTC to prevent browser timezone conversion issues
+                    min_date_ts = min_date.tz_localize(None).tz_localize("UTC").timestamp() * 1000
 
                     # Calculate initial window end time (1 hour from start)
                     initial_window_hours = 1.0
@@ -300,21 +304,54 @@ def register_callbacks(app):
 
         return no_update, no_update, no_update
 
+    # ========================================
+    # Timeline Chart - Build full chart (only on initial load or visibility change)
+    # ========================================
     @app.callback(
-        Output("timeline-chart", "figure"),
         [
-            Input("event-store", "data"),
-            Input("time-slider", "value"),
-            Input("window-size-input", "value"),
+            Output("timeline-chart", "figure"),
+            Output("chart-initialized", "data"),
+        ],
+        [
+            Input("classified-csv-path", "data"),  # Triggers on new analysis
             Input("category-visibility", "value"),
         ],
-        [State("analysis-metadata", "data")],
+        [
+            State("event-store", "data"),
+            State("analysis-metadata", "data"),
+            State("window-size-input", "value"),
+            State("time-slider", "value"),  # Get current slider position
+            State("chart-initialized", "data"),
+        ],
     )
-    def update_timeline_chart(
-        event_data, slider_value, window_hours, visible_categories, metadata
+    def build_timeline_chart(
+        csv_path,
+        visible_categories,
+        event_data,
+        metadata,
+        window_hours,
+        slider_value,
+        is_initialized,
     ):
+        """Build the full timeline chart - only on initial load or visibility change."""
+        from dash import callback_context
+
+        ctx = callback_context
+        trigger = ctx.triggered[0]["prop_id"] if ctx.triggered else "none"
+        print(
+            f"DEBUG build_timeline_chart TRIGGERED by: {trigger}, csv_path={csv_path}, last_built={_last_built_csv_path['value']}",
+            flush=True,
+        )
+
+        # Skip if this csv_path was already built (prevents duplicate builds)
+        if (
+            trigger == "classified-csv-path.data"
+            and csv_path == _last_built_csv_path["value"]
+        ):
+            print("DEBUG: Skipping rebuild - same csv_path already built", flush=True)
+            return no_update, no_update
+
         if not event_data or not metadata:
-            # Return empty figure
             fig = go.Figure()
             fig.update_layout(
                 xaxis_title="Time",
@@ -322,18 +359,16 @@ def register_callbacks(app):
                 height=400,
                 margin=dict(t=20, b=40, l=50, r=20),
             )
-            return fig
+            return fig, False
 
         df = pd.DataFrame(event_data)
         df["datetime_start"] = pd.to_datetime(df["datetime_start"])
 
         min_date = pd.to_datetime(metadata.get("min_date"))
-        max_date = pd.to_datetime(metadata.get("max_date"))
-
-        # Calculate window
         window_hours = window_hours or 1.0
         slider_value = slider_value or 0
 
+        # Use current slider position to maintain view
         window_start = min_date + timedelta(days=slider_value)
         window_end = window_start + timedelta(hours=window_hours)
 
@@ -341,54 +376,46 @@ def register_callbacks(app):
         if visible_categories:
             df = df[df["Category"].isin(visible_categories)]
 
-        # Create figure
+        # Create figure with all traces
         fig = go.Figure()
 
-        # Add traces for each category
-        for category in ALL_CATEGORIES:
-            if category not in (visible_categories or []):
-                continue
-
-            cat_df = df[df["Category"] == category]
-            if cat_df.empty:
+        for idx, row in df.iterrows():
+            category = row.get("Category", "Other")
+            if category not in (visible_categories or ALL_CATEGORIES):
                 continue
 
             color = CATEGORY_COLORS.get(category, "gray")
 
-            for idx, row in cat_df.iterrows():
-                flow_rates = row.get("flow_rates", [])
-                if isinstance(flow_rates, str):
-                    try:
-                        import ast
+            flow_rates = row.get("flow_rates", [])
+            if isinstance(flow_rates, str):
+                try:
+                    import ast
 
-                        flow_rates = ast.literal_eval(flow_rates)
-                    except:
-                        flow_rates = []
+                    flow_rates = ast.literal_eval(flow_rates)
+                except:
+                    flow_rates = []
 
-                if flow_rates:
-                    start_time = row["datetime_start"]
-                    times = [
-                        start_time + timedelta(seconds=i)
-                        for i in range(len(flow_rates))
-                    ]
+            if flow_rates:
+                start_time = row["datetime_start"]
+                times = [
+                    start_time + timedelta(seconds=i) for i in range(len(flow_rates))
+                ]
+                custom_data = [[idx]] * len(flow_rates)
 
-                    # Store event index for click handling
-                    custom_data = [[idx]] * len(flow_rates)
-
-                    fig.add_trace(
-                        go.Scatter(
-                            x=times,
-                            y=flow_rates,
-                            mode="lines",
-                            fill="tozeroy",
-                            name=category,
-                            line=dict(color=color, width=1),
-                            fillcolor=color,
-                            showlegend=False,
-                            customdata=custom_data,
-                            hovertemplate=f"{category}<br>Time: %{{x}}<br>Flow: %{{y:.2f}} L/min<br><i>Click for details</i><extra></extra>",
-                        )
+                fig.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=flow_rates,
+                        mode="lines",
+                        fill="tozeroy",
+                        name=category,
+                        line=dict(color=color, width=1),
+                        fillcolor=color,
+                        showlegend=False,
+                        customdata=custom_data,
+                        hovertemplate=f"{category}<br>Time: %{{x}}<br>Flow: %{{y:.2f}} L/min<br><i>Click for details</i><extra></extra>",
                     )
+                )
 
         fig.update_layout(
             xaxis=dict(
@@ -399,13 +426,43 @@ def register_callbacks(app):
                 title="Time",
             ),
             yaxis=dict(title="Flow Rate (L/min)", rangemode="tozero"),
-            height=300,
+            height=400,
             margin=dict(l=50, r=20, t=30, b=40),
             showlegend=False,
             hovermode="closest",
         )
 
-        return fig
+        # Mark this csv_path as built to prevent duplicate builds
+        _last_built_csv_path["value"] = csv_path
+        print(
+            f"DEBUG: Chart built successfully, marked csv_path={csv_path}", flush=True
+        )
+
+        return fig, True  # Mark chart as initialized
+
+    # ========================================
+    # Timeline Chart - Update window range only (FAST)
+    # ========================================
+    # ========================================
+    # Timeline Chart - Update window range (CLIENT-SIDE)
+    # ========================================
+    app.clientside_callback(
+        ClientsideFunction(namespace="clientside", function_name="updateTimeline"),
+        [
+            Output("timeline-chart", "figure", allow_duplicate=True),
+            Output("date-from", "value", allow_duplicate=True),
+            Output("date-to", "value", allow_duplicate=True),
+        ],
+        [
+            Input("time-slider", "value"),
+            Input("window-size-input", "value"),
+        ],
+        [
+            State("analysis-metadata", "data"),
+            State("timeline-chart", "figure"),
+        ],
+        prevent_initial_call=True,
+    )
 
     # Clientside callback for slider scroll buttons
     app.clientside_callback(
@@ -432,6 +489,7 @@ def register_callbacks(app):
             Output("nav-index-for-plotting", "data"),
             Output("date-from", "value"),
             Output("date-to", "value"),
+            Output("time-slider", "value", allow_duplicate=True),
         ],
         [
             Input("prev-event-btn", "n_clicks"),
@@ -480,6 +538,7 @@ def register_callbacks(app):
                 no_update,
                 no_update,
                 no_update,
+                no_update,
             )
 
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
@@ -496,7 +555,9 @@ def register_callbacks(app):
         # Filter by category
         cat_df = df[df["Category"] == category].copy()
         if cat_df.empty:
+            print(f"DEBUG: No events found for category '{category}'", flush=True)
             return (
+                no_update,
                 no_update,
                 no_update,
                 no_update,
@@ -513,6 +574,8 @@ def register_callbacks(app):
         is_next = trigger_id == "next-event-btn"
         new_direction = "next" if is_next else "previous"
 
+        print(f"DEBUG: Navigating {new_direction} for category '{category}'", flush=True)
+
         # Check if we need to rebuild the index list
         rebuild_list = (
             same_category != category
@@ -521,6 +584,7 @@ def register_callbacks(app):
         )
 
         if rebuild_list:
+            print("DEBUG: Rebuilding index list...", flush=True)
             # Build list of all events of this category
             if is_next:
                 # Find events after current window start
@@ -530,9 +594,12 @@ def register_callbacks(app):
                 # Find events before current window start
                 past_events = cat_df[cat_df["datetime_start"] < current_window_start]
                 remaining_indices = past_events.index.tolist()[::-1]  # Reverse for prev
+            
+            print(f"DEBUG: Found {len(remaining_indices)} remaining events", flush=True)
 
         if not remaining_indices:
             # No more events in this direction, wrap around
+            print("DEBUG: Wrapping around...", flush=True)
             if is_next:
                 remaining_indices = cat_df.index.tolist()
             else:
@@ -548,6 +615,7 @@ def register_callbacks(app):
                 [],
                 no_update,
                 no_update,
+                no_update,
             )
 
         # Get next event index
@@ -557,6 +625,9 @@ def register_callbacks(app):
         # Get event details
         event_row = cat_df.loc[index_of_searched_event]
         event_start = event_row["datetime_start"]
+        event_cat = event_row["Category"]
+        
+        print(f"DEBUG: Navigating to event: Time={event_start}, Category={event_cat}", flush=True)
 
         # Calculate slider position to center the event
         offset_days = window_days / 2
@@ -565,30 +636,20 @@ def register_callbacks(app):
         # Clamp to valid range
         new_slider_value = max(0, min(slider_max or 100, new_slider_days))
 
-        # Calculate new time range
-        start_time = min_date + timedelta(days=new_slider_value)
-        end_time = start_time + timedelta(days=window_days)
-
-        # Create a Patch object to update only the xaxis range
-        patched_figure = Patch()
-        patched_figure["layout"]["xaxis"]["range"] = [
-            start_time.strftime("%Y-%m-%dT%H:%M:%S"),
-            end_time.strftime("%Y-%m-%dT%H:%M:%S"),
-        ]
-
-        # Format dates for From/To textboxes (DD/MM/YYYY HH:MM:SS)
-        from_date_str = start_time.strftime("%d/%m/%Y %H:%M:%S")
-        to_date_str = end_time.strftime("%d/%m/%Y %H:%M:%S")
+        # We ONLY update the slider value. The client-side callback 'updateTimeline'
+        # will detect the slider change and update the chart + date inputs.
+        # This prevents conflict between server-side Patch and client-side figure update.
 
         return (
-            patched_figure,
+            no_update,  # timeline-chart (let client-side handle it)
             index_of_searched_event,
             remaining_indices,
             category,
             new_direction,
             index_for_plotting,
-            from_date_str,
-            to_date_str,
+            no_update,  # date-from (let client-side handle it)
+            no_update,  # date-to (let client-side handle it)
+            new_slider_value,
         )
 
     # ========================================
@@ -1143,7 +1204,7 @@ def register_callbacks(app):
         return is_open, no_update, no_update, no_update, no_update, no_update
 
     # ========================================
-    # Reclassification Confirmation Callback
+    # Reclassification Confirmation Callback (OPTIMIZED - index-based)
     # ========================================
     @app.callback(
         [
@@ -1160,10 +1221,9 @@ def register_callbacks(app):
             State("modal-original-category", "data"),
             State("event-store", "data"),
             State("classified-csv-path", "data"),
-            State("analysis-metadata", "data"),
-            State("time-slider", "value"),
-            State("window-size-input", "value"),
-            State("category-visibility", "value"),
+            State("summary-table", "data"),
+            State("event-list-table", "data"),
+            State("timeline-chart", "figure"),
         ],
         prevent_initial_call=True,
     )
@@ -1174,12 +1234,11 @@ def register_callbacks(app):
         original_category,
         event_data,
         csv_path,
-        metadata,
-        slider_value,
-        window_hours,
-        visible_categories,
+        current_summary,
+        current_event_list,
+        current_figure,
     ):
-        """Confirm reclassification and update all related data."""
+        """Optimized reclassification - only update what changed."""
         if not n_clicks or event_idx is None or not event_data:
             return no_update, no_update, no_update, no_update, no_update
 
@@ -1188,19 +1247,94 @@ def register_callbacks(app):
             return no_update, no_update, no_update, False, no_update
 
         try:
-            # Update event in event_data
-            df_events = pd.DataFrame(event_data)
+            # Get the volume of the event being reclassified
+            event_volume = 0
+            if isinstance(event_idx, int) and event_idx < len(event_data):
+                event_volume = float(event_data[event_idx].get("Volume (L)", 0))
 
-            if event_idx in df_events.index:
-                df_events.loc[event_idx, "Category"] = new_category
-            elif isinstance(event_idx, int) and event_idx < len(df_events):
-                df_events.iloc[event_idx, df_events.columns.get_loc("Category")] = (
-                    new_category
+            # === 1. Update event_store (just change category at index) ===
+            updated_event_data = copy.deepcopy(event_data)
+            if isinstance(event_idx, int) and event_idx < len(updated_event_data):
+                updated_event_data[event_idx]["Category"] = new_category
+
+            # === 2. Update summary table (add/subtract volume) ===
+            updated_summary = copy.deepcopy(current_summary) if current_summary else []
+
+            # Find category indices in summary
+            old_cat_idx = None
+            new_cat_idx = None
+            total_idx = None
+
+            for i, row in enumerate(updated_summary):
+                if row.get("Category") == original_category:
+                    old_cat_idx = i
+                if row.get("Category") == new_category:
+                    new_cat_idx = i
+                if row.get("Category") == "Total":
+                    total_idx = i
+
+            # Subtract from old category, add to new category
+            if old_cat_idx is not None and event_volume > 0:
+                updated_summary[old_cat_idx]["Volume (L)"] = round(
+                    updated_summary[old_cat_idx].get("Volume (L)", 0) - event_volume, 2
                 )
-            else:
-                return no_update, no_update, no_update, no_update, no_update
+            if new_cat_idx is not None:
+                updated_summary[new_cat_idx]["Volume (L)"] = round(
+                    updated_summary[new_cat_idx].get("Volume (L)", 0) + event_volume, 2
+                )
 
-            # Update the CSV file if it exists
+            # Recalculate percentages
+            total_volume = sum(
+                row.get("Volume (L)", 0)
+                for row in updated_summary
+                if row.get("Category") != "Total"
+            )
+            for row in updated_summary:
+                if row.get("Category") != "Total":
+                    if total_volume > 0:
+                        row["Percentage (%)"] = round(
+                            (row.get("Volume (L)", 0) / total_volume) * 100, 1
+                        )
+                    else:
+                        row["Percentage (%)"] = 0
+
+            # === 3. Update event list table (just change category at index) ===
+            updated_event_list = (
+                copy.deepcopy(current_event_list) if current_event_list else []
+            )
+            if isinstance(event_idx, int) and event_idx < len(updated_event_list):
+                updated_event_list[event_idx]["Category"] = new_category
+
+            # === 4. Update chart (just change color of the specific trace) ===
+            new_color = CATEGORY_COLORS.get(new_category, "gray")
+            patched_figure = Patch()
+
+            # Find the trace index that corresponds to this event
+            # Since each event creates one trace, event_idx should correspond to trace index
+            # But we need to account for filtered categories
+            if current_figure and "data" in current_figure:
+                # Find trace by matching customdata
+                for trace_idx, trace in enumerate(current_figure.get("data", [])):
+                    customdata = trace.get("customdata", [])
+                    if customdata and len(customdata) > 0:
+                        trace_event_idx = (
+                            customdata[0][0]
+                            if isinstance(customdata[0], list)
+                            else customdata[0]
+                        )
+                        if trace_event_idx == event_idx:
+                            # Update this trace's color and name
+                            patched_figure["data"][trace_idx]["line"][
+                                "color"
+                            ] = new_color
+                            patched_figure["data"][trace_idx]["fillcolor"] = new_color
+                            patched_figure["data"][trace_idx]["name"] = new_category
+                            patched_figure["data"][trace_idx][
+                                "hovertemplate"
+                            ] = f"{new_category}<br>Time: %{{x}}<br>Flow: %{{y:.2f}} L/min<br><i>Click for details</i><extra></extra>"
+                            break
+
+            # === 5. Update CSV file in background ===
             if csv_path and Path(csv_path).exists():
                 try:
                     csv_df = pd.read_csv(csv_path)
@@ -1209,128 +1343,21 @@ def register_callbacks(app):
                             new_category
                         )
                         csv_df.to_csv(csv_path, index=False)
-                        print(
-                            f"Updated CSV: Event {event_idx} reclassified to {new_category}",
-                            flush=True,
-                        )
                 except Exception as e:
                     print(f"Error updating CSV: {e}", flush=True)
-
-            # Calculate new summary statistics
-            summary_data = calculate_summary_stats(df_events)
-
-            # Prepare event list table data
-            event_list_columns = [
-                "Start date",
-                "Start time",
-                "Category",
-                "Duration (h:m:s)",
-                "Volume (L)",
-                "Max flow (litre/min)",
-            ]
-            event_list_data = df_events[
-                [c for c in event_list_columns if c in df_events.columns]
-            ].to_dict("records")
-
-            # Rebuild timeline chart with updated data
-            df_events["datetime_start"] = pd.to_datetime(df_events["datetime_start"])
-
-            min_date = pd.to_datetime(metadata.get("min_date"))
-            window_hours = window_hours or 1.0
-            slider_value = slider_value or 0
-
-            window_start = min_date + timedelta(days=slider_value)
-            window_end = window_start + timedelta(hours=window_hours)
-
-            # Filter by visible categories
-            df_filtered = df_events.copy()
-            if visible_categories:
-                df_filtered = df_filtered[
-                    df_filtered["Category"].isin(visible_categories)
-                ]
-
-            # Create figure
-            fig = go.Figure()
-
-            for category in ALL_CATEGORIES:
-                if category not in (visible_categories or []):
-                    continue
-
-                cat_df = df_filtered[df_filtered["Category"] == category]
-                if cat_df.empty:
-                    continue
-
-                color = CATEGORY_COLORS.get(category, "gray")
-
-                for idx, row in cat_df.iterrows():
-                    flow_rates = row.get("flow_rates", [])
-                    if isinstance(flow_rates, str):
-                        try:
-                            import ast
-
-                            flow_rates = ast.literal_eval(flow_rates)
-                        except:
-                            flow_rates = []
-
-                    if flow_rates:
-                        start_time = row["datetime_start"]
-                        times = [
-                            start_time + timedelta(seconds=i)
-                            for i in range(len(flow_rates))
-                        ]
-                        custom_data = [[idx]] * len(flow_rates)
-
-                        fig.add_trace(
-                            go.Scatter(
-                                x=times,
-                                y=flow_rates,
-                                mode="lines",
-                                fill="tozeroy",
-                                name=category,
-                                line=dict(color=color, width=1),
-                                fillcolor=color,
-                                showlegend=False,
-                                customdata=custom_data,
-                                hovertemplate=f"{category}<br>Time: %{{x}}<br>Flow: %{{y:.2f}} L/min<br><i>Click for details</i><extra></extra>",
-                            )
-                        )
-
-            fig.update_layout(
-                xaxis=dict(
-                    range=[
-                        window_start.strftime("%Y-%m-%dT%H:%M:%S"),
-                        window_end.strftime("%Y-%m-%dT%H:%M:%S"),
-                    ],
-                    title="Time",
-                ),
-                yaxis=dict(title="Flow Rate (L/min)", rangemode="tozero"),
-                height=400,
-                margin=dict(l=50, r=20, t=30, b=40),
-                showlegend=False,
-                hovermode="closest",
-            )
-
-            # Convert updated events back to list of dicts
-            # Convert datetime columns to strings for JSON serialization
-            df_for_store = df_events.copy()
-            if "datetime_start" in df_for_store.columns:
-                df_for_store["datetime_start"] = df_for_store["datetime_start"].astype(
-                    str
-                )
-            if "datetime_end" in df_for_store.columns:
-                df_for_store["datetime_end"] = df_for_store["datetime_end"].astype(str)
-            updated_event_data = df_for_store.to_dict("records")
-
-            # Update the cache if we have a csv_path
-            if csv_path:
-                update_cached_data(csv_path, df_events)
 
             print(
                 f"Reclassified event {event_idx} from {original_category} to {new_category}",
                 flush=True,
             )
 
-            return updated_event_data, summary_data, event_list_data, False, fig
+            return (
+                updated_event_data,
+                updated_summary,
+                updated_event_list,
+                False,
+                patched_figure,
+            )
 
         except Exception as e:
             print(f"Error in reclassification: {e}", flush=True)

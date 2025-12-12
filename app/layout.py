@@ -472,6 +472,7 @@ def create_layout():
             dcc.Store(id="current-event-index", data=None),
             dcc.Store(id="analysis-metadata", data={}),
             dcc.Store(id="cache-version", data=0),
+            dcc.Store(id="chart-initialized", data=False),  # Track if chart is built
             dcc.Store(id="nav-remaining-indices", data=[]),
             dcc.Store(id="nav-same-category", data=None),
             dcc.Store(id="nav-search-direction", data=None),
