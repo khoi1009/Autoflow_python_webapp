@@ -395,7 +395,7 @@ def create_layout():
                         ],
                         width=10,
                         className="d-flex flex-column",
-                        style={"height": "350px"},
+                        style={"height": "calc(100vh - 380px)", "minHeight": "400px"},
                     ),
                 ],
                 className="flex-grow-1 mb-2",
@@ -440,34 +440,19 @@ def create_layout():
                     ),
                     dbc.Col(
                         [
-                            dbc.InputGroup(
-                                [
-                                    dbc.Button(
-                                        "Display options",
-                                        color="danger",
-                                        outline=True,
-                                        size="sm",
-                                        className="border",
-                                    ),
-                                ],
-                                size="sm",
-                            )
-                        ],
-                        width=4,
-                    ),
-                    dbc.Col(
-                        [
                             dbc.Button(
                                 "Display options",
-                                color="danger",
+                                id="display-options-btn",
+                                color="info",
                                 outline=True,
                                 size="sm",
-                                className="me-2",
+                                className="border",
                             ),
                         ],
-                        width=4,
+                        width="auto",
                         className="text-center",
                     ),
+                    dbc.Col(width=True),  # Spacer
                     dbc.Col(
                         [
                             html.Span(
@@ -546,15 +531,30 @@ def create_layout():
                     dbc.ModalHeader(dbc.ModalTitle("Event Details", id="modal-title")),
                     dbc.ModalBody(id="modal-body"),
                     dbc.ModalFooter(
-                        dbc.Button(
-                            "Close", id="close-modal", className="ms-auto", n_clicks=0
-                        )
+                        [
+                            dbc.Button(
+                                "✓ Confirm Reclassification",
+                                id="confirm-reclassify-btn",
+                                color="success",
+                                className="me-2",
+                                style={"display": "none"},
+                            ),
+                            dbc.Button(
+                                "Close",
+                                id="close-modal",
+                                className="ms-auto",
+                                n_clicks=0,
+                            ),
+                        ]
                     ),
                 ],
                 id="event-modal",
                 size="xl",
                 is_open=False,
             ),
+            # Store for current event being viewed in modal
+            dcc.Store(id="modal-event-index", data=None),
+            dcc.Store(id="modal-original-category", data=None),
             # Progress Modal
             dbc.Modal(
                 [

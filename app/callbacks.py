@@ -184,14 +184,13 @@ def register_callbacks(app):
     )
     def update_summary_table_callback(classified_path):
         if not classified_path:
-            return calculate_summary_stats(pd.DataFrame()).to_dict("records")
+            return calculate_summary_stats(pd.DataFrame())
 
         df_events = get_cached_data(classified_path)
         if df_events is None:
-            return calculate_summary_stats(pd.DataFrame()).to_dict("records")
+            return calculate_summary_stats(pd.DataFrame())
 
-        summary_df = calculate_summary_stats(df_events, None)
-        return summary_df.to_dict("records")
+        return calculate_summary_stats(df_events, None)
 
     @app.callback(
         Output("event-list-table", "data"),
@@ -291,12 +290,12 @@ def register_callbacks(app):
                 update_cached_data(classified_path, df_events)
 
             # Recalculate summary
-            summary_df = calculate_summary_stats(df_events)
+            summary_data = calculate_summary_stats(df_events)
 
             return (
                 df_events.to_dict("records"),
                 (cache_version or 0) + 1,
-                summary_df.to_dict("records"),
+                summary_data,
             )
 
         return no_update, no_update, no_update
@@ -318,10 +317,10 @@ def register_callbacks(app):
             # Return empty figure
             fig = go.Figure()
             fig.update_layout(
-                title="Upload a CSV file and run analysis to see the timeline",
                 xaxis_title="Time",
                 yaxis_title="Flow Rate (L/min)",
-                height=300,
+                height=400,
+                margin=dict(t=20, b=40, l=50, r=20),
             )
             return fig
 
@@ -356,7 +355,7 @@ def register_callbacks(app):
 
             color = CATEGORY_COLORS.get(category, "gray")
 
-            for _, row in cat_df.iterrows():
+            for idx, row in cat_df.iterrows():
                 flow_rates = row.get("flow_rates", [])
                 if isinstance(flow_rates, str):
                     try:
@@ -373,6 +372,9 @@ def register_callbacks(app):
                         for i in range(len(flow_rates))
                     ]
 
+                    # Store event index for click handling
+                    custom_data = [[idx]] * len(flow_rates)
+
                     fig.add_trace(
                         go.Scatter(
                             x=times,
@@ -383,7 +385,8 @@ def register_callbacks(app):
                             line=dict(color=color, width=1),
                             fillcolor=color,
                             showlegend=False,
-                            hovertemplate=f"{category}<br>Time: %{{x}}<br>Flow: %{{y:.2f}} L/min<extra></extra>",
+                            customdata=custom_data,
+                            hovertemplate=f"{category}<br>Time: %{{x}}<br>Flow: %{{y:.2f}} L/min<br><i>Click for details</i><extra></extra>",
                         )
                     )
 
@@ -788,13 +791,550 @@ def register_callbacks(app):
             print(f"Error opening project: {e}", flush=True)
             return [no_update] * 11
 
-    # Modal close callback
+    # ========================================
+    # Event Details Modal Callback
+    # ========================================
     @app.callback(
-        Output("event-modal", "is_open"),
-        [Input("close-modal", "n_clicks")],
-        [State("event-modal", "is_open")],
+        [
+            Output("event-modal", "is_open"),
+            Output("modal-title", "children"),
+            Output("modal-body", "children"),
+            Output("modal-event-index", "data"),
+            Output("modal-original-category", "data"),
+            Output("confirm-reclassify-btn", "style"),
+        ],
+        [
+            Input("timeline-chart", "clickData"),
+            Input("close-modal", "n_clicks"),
+        ],
+        [
+            State("event-modal", "is_open"),
+            State("event-store", "data"),
+        ],
     )
-    def toggle_modal(n_clicks, is_open):
-        if n_clicks:
-            return False
-        return is_open
+    def handle_event_click(click_data, close_clicks, is_open, event_data):
+        """Handle click on timeline to show event details with chart."""
+        from dash import callback_context, no_update
+
+        if not callback_context.triggered:
+            return is_open, no_update, no_update, no_update, no_update, no_update
+
+        trigger_id = callback_context.triggered[0]["prop_id"].split(".")[0]
+
+        # Handle close button
+        if trigger_id == "close-modal":
+            return False, no_update, no_update, None, None, {"display": "none"}
+
+        # Handle chart click
+        if trigger_id == "timeline-chart" and click_data and event_data:
+            try:
+                point = click_data["points"][0]
+                event_idx = point.get("customdata", [None])[0]
+
+                if event_idx is None:
+                    return (
+                        is_open,
+                        no_update,
+                        no_update,
+                        no_update,
+                        no_update,
+                        no_update,
+                    )
+
+                # Find the event in event_data
+                df_events = pd.DataFrame(event_data)
+
+                if event_idx not in df_events.index:
+                    if isinstance(event_idx, int) and event_idx < len(df_events):
+                        event = df_events.iloc[event_idx]
+                        actual_idx = event_idx
+                    else:
+                        return (
+                            is_open,
+                            no_update,
+                            no_update,
+                            no_update,
+                            no_update,
+                            no_update,
+                        )
+                else:
+                    event = df_events.loc[event_idx]
+                    actual_idx = event_idx
+
+                category = event.get("Category", "Unknown")
+                color = CATEGORY_COLORS.get(category, "red")
+
+                # Build modal title
+                title = f"📊 {category} Event Details"
+
+                # Create flow rate chart
+                flow_rates = event.get("flow_rates", [])
+                if isinstance(flow_rates, str):
+                    try:
+                        import ast
+
+                        flow_rates = ast.literal_eval(flow_rates)
+                    except:
+                        flow_rates = []
+
+                # Create the event shape chart
+                event_fig = go.Figure()
+                if flow_rates:
+                    times = list(range(len(flow_rates)))
+                    event_fig.add_trace(
+                        go.Scatter(
+                            x=times,
+                            y=flow_rates,
+                            mode="lines",
+                            fill="tozeroy",
+                            line=dict(color=color, width=2),
+                            fillcolor=color,
+                            hovertemplate="Time: %{x}s<br>Flow: %{y:.2f} L/min<extra></extra>",
+                        )
+                    )
+                event_fig.update_layout(
+                    xaxis=dict(title="Time (seconds)", showgrid=True, gridcolor="#eee"),
+                    yaxis=dict(
+                        title="Flow rate (L/min)",
+                        showgrid=True,
+                        gridcolor="#eee",
+                        rangemode="tozero",
+                    ),
+                    height=250,
+                    margin=dict(l=50, r=20, t=10, b=40),
+                    plot_bgcolor="white",
+                    showlegend=False,
+                )
+
+                # Build modal body with two columns: left=details, right=chart
+                body = dbc.Container(
+                    [
+                        dbc.Row(
+                            [
+                                # Left column - Event details
+                                dbc.Col(
+                                    [
+                                        # Event info table
+                                        html.Table(
+                                            [
+                                                html.Tbody(
+                                                    [
+                                                        html.Tr(
+                                                            [
+                                                                html.Td(
+                                                                    "Date",
+                                                                    style={
+                                                                        "fontWeight": "bold",
+                                                                        "padding": "5px 15px 5px 5px",
+                                                                    },
+                                                                ),
+                                                                html.Td(
+                                                                    event.get(
+                                                                        "Start date", ""
+                                                                    ),
+                                                                    style={
+                                                                        "padding": "5px"
+                                                                    },
+                                                                ),
+                                                            ]
+                                                        ),
+                                                        html.Tr(
+                                                            [
+                                                                html.Td(
+                                                                    "Start time",
+                                                                    style={
+                                                                        "fontWeight": "bold",
+                                                                        "padding": "5px 15px 5px 5px",
+                                                                    },
+                                                                ),
+                                                                html.Td(
+                                                                    event.get(
+                                                                        "Start time", ""
+                                                                    ),
+                                                                    style={
+                                                                        "padding": "5px"
+                                                                    },
+                                                                ),
+                                                            ]
+                                                        ),
+                                                        html.Tr(
+                                                            [
+                                                                html.Td(
+                                                                    "End time",
+                                                                    style={
+                                                                        "fontWeight": "bold",
+                                                                        "padding": "5px 15px 5px 5px",
+                                                                    },
+                                                                ),
+                                                                html.Td(
+                                                                    event.get(
+                                                                        "End time", ""
+                                                                    ),
+                                                                    style={
+                                                                        "padding": "5px"
+                                                                    },
+                                                                ),
+                                                            ]
+                                                        ),
+                                                        html.Tr(
+                                                            [
+                                                                html.Td(
+                                                                    "Category",
+                                                                    style={
+                                                                        "fontWeight": "bold",
+                                                                        "padding": "5px 15px 5px 5px",
+                                                                    },
+                                                                ),
+                                                                html.Td(
+                                                                    html.Span(
+                                                                        category,
+                                                                        style={
+                                                                            "color": color,
+                                                                            "fontWeight": "bold",
+                                                                        },
+                                                                    ),
+                                                                    style={
+                                                                        "padding": "5px"
+                                                                    },
+                                                                ),
+                                                            ]
+                                                        ),
+                                                        html.Tr(
+                                                            [
+                                                                html.Td(
+                                                                    "Duration",
+                                                                    style={
+                                                                        "fontWeight": "bold",
+                                                                        "padding": "5px 15px 5px 5px",
+                                                                    },
+                                                                ),
+                                                                html.Td(
+                                                                    event.get(
+                                                                        "Duration (h:m:s)",
+                                                                        "N/A",
+                                                                    ),
+                                                                    style={
+                                                                        "padding": "5px"
+                                                                    },
+                                                                ),
+                                                            ]
+                                                        ),
+                                                        html.Tr(
+                                                            [
+                                                                html.Td(
+                                                                    "Total Volume (L)",
+                                                                    style={
+                                                                        "fontWeight": "bold",
+                                                                        "padding": "5px 15px 5px 5px",
+                                                                    },
+                                                                ),
+                                                                html.Td(
+                                                                    f"{float(event.get('Volume (L)', 0)):.4f}",
+                                                                    style={
+                                                                        "padding": "5px"
+                                                                    },
+                                                                ),
+                                                            ]
+                                                        ),
+                                                        html.Tr(
+                                                            [
+                                                                html.Td(
+                                                                    "Max Flow (L/min)",
+                                                                    style={
+                                                                        "fontWeight": "bold",
+                                                                        "padding": "5px 15px 5px 5px",
+                                                                    },
+                                                                ),
+                                                                html.Td(
+                                                                    f"{float(event.get('Max flow (litre/min)', 0)):.4f}",
+                                                                    style={
+                                                                        "padding": "5px"
+                                                                    },
+                                                                ),
+                                                            ]
+                                                        ),
+                                                        html.Tr(
+                                                            [
+                                                                html.Td(
+                                                                    "Mode Flow (L/min)",
+                                                                    style={
+                                                                        "fontWeight": "bold",
+                                                                        "padding": "5px 15px 5px 5px",
+                                                                    },
+                                                                ),
+                                                                html.Td(
+                                                                    f"{float(event.get('Mode (L/min)', 0)):.4f}",
+                                                                    style={
+                                                                        "padding": "5px"
+                                                                    },
+                                                                ),
+                                                            ]
+                                                        ),
+                                                    ]
+                                                )
+                                            ],
+                                            style={
+                                                "borderCollapse": "collapse",
+                                                "width": "100%",
+                                                "fontSize": "0.9em",
+                                            },
+                                        ),
+                                        html.Hr(className="my-3"),
+                                        # Reclassify section
+                                        html.Div(
+                                            [
+                                                html.Label(
+                                                    "Select one of the following options",
+                                                    className="small text-muted mb-1",
+                                                ),
+                                                dbc.Select(
+                                                    id="modal-reclassify-select",
+                                                    options=[
+                                                        {"label": c, "value": c}
+                                                        for c in ALL_CATEGORIES
+                                                    ],
+                                                    value=category,
+                                                    size="sm",
+                                                    className="mb-2",
+                                                ),
+                                            ]
+                                        ),
+                                    ],
+                                    width=5,
+                                    style={
+                                        "borderRight": "1px solid #dee2e6",
+                                        "paddingRight": "15px",
+                                    },
+                                ),
+                                # Right column - Chart
+                                dbc.Col(
+                                    [
+                                        dcc.Graph(
+                                            figure=event_fig,
+                                            config={"displayModeBar": False},
+                                            style={"height": "100%"},
+                                        ),
+                                    ],
+                                    width=7,
+                                    style={"paddingLeft": "15px"},
+                                ),
+                            ]
+                        ),
+                    ],
+                    fluid=True,
+                )
+
+                return (
+                    True,
+                    title,
+                    body,
+                    actual_idx,
+                    category,
+                    {"display": "inline-block"},
+                )
+
+            except Exception as e:
+                print(f"Error handling click: {e}", flush=True)
+                import traceback
+
+                traceback.print_exc()
+                return is_open, no_update, no_update, no_update, no_update, no_update
+
+        return is_open, no_update, no_update, no_update, no_update, no_update
+
+    # ========================================
+    # Reclassification Confirmation Callback
+    # ========================================
+    @app.callback(
+        [
+            Output("event-store", "data", allow_duplicate=True),
+            Output("summary-table", "data", allow_duplicate=True),
+            Output("event-list-table", "data", allow_duplicate=True),
+            Output("event-modal", "is_open", allow_duplicate=True),
+            Output("timeline-chart", "figure", allow_duplicate=True),
+        ],
+        [Input("confirm-reclassify-btn", "n_clicks")],
+        [
+            State("modal-reclassify-select", "value"),
+            State("modal-event-index", "data"),
+            State("modal-original-category", "data"),
+            State("event-store", "data"),
+            State("classified-csv-path", "data"),
+            State("analysis-metadata", "data"),
+            State("time-slider", "value"),
+            State("window-size-input", "value"),
+            State("category-visibility", "value"),
+        ],
+        prevent_initial_call=True,
+    )
+    def confirm_reclassification(
+        n_clicks,
+        new_category,
+        event_idx,
+        original_category,
+        event_data,
+        csv_path,
+        metadata,
+        slider_value,
+        window_hours,
+        visible_categories,
+    ):
+        """Confirm reclassification and update all related data."""
+        if not n_clicks or event_idx is None or not event_data:
+            return no_update, no_update, no_update, no_update, no_update
+
+        # Skip if category didn't change
+        if new_category == original_category:
+            return no_update, no_update, no_update, False, no_update
+
+        try:
+            # Update event in event_data
+            df_events = pd.DataFrame(event_data)
+
+            if event_idx in df_events.index:
+                df_events.loc[event_idx, "Category"] = new_category
+            elif isinstance(event_idx, int) and event_idx < len(df_events):
+                df_events.iloc[event_idx, df_events.columns.get_loc("Category")] = (
+                    new_category
+                )
+            else:
+                return no_update, no_update, no_update, no_update, no_update
+
+            # Update the CSV file if it exists
+            if csv_path and Path(csv_path).exists():
+                try:
+                    csv_df = pd.read_csv(csv_path)
+                    if event_idx < len(csv_df):
+                        csv_df.iloc[event_idx, csv_df.columns.get_loc("Category")] = (
+                            new_category
+                        )
+                        csv_df.to_csv(csv_path, index=False)
+                        print(
+                            f"Updated CSV: Event {event_idx} reclassified to {new_category}",
+                            flush=True,
+                        )
+                except Exception as e:
+                    print(f"Error updating CSV: {e}", flush=True)
+
+            # Calculate new summary statistics
+            summary_data = calculate_summary_stats(df_events)
+
+            # Prepare event list table data
+            event_list_columns = [
+                "Start date",
+                "Start time",
+                "Category",
+                "Duration (h:m:s)",
+                "Volume (L)",
+                "Max flow (litre/min)",
+            ]
+            event_list_data = df_events[
+                [c for c in event_list_columns if c in df_events.columns]
+            ].to_dict("records")
+
+            # Rebuild timeline chart with updated data
+            df_events["datetime_start"] = pd.to_datetime(df_events["datetime_start"])
+
+            min_date = pd.to_datetime(metadata.get("min_date"))
+            window_hours = window_hours or 1.0
+            slider_value = slider_value or 0
+
+            window_start = min_date + timedelta(days=slider_value)
+            window_end = window_start + timedelta(hours=window_hours)
+
+            # Filter by visible categories
+            df_filtered = df_events.copy()
+            if visible_categories:
+                df_filtered = df_filtered[
+                    df_filtered["Category"].isin(visible_categories)
+                ]
+
+            # Create figure
+            fig = go.Figure()
+
+            for category in ALL_CATEGORIES:
+                if category not in (visible_categories or []):
+                    continue
+
+                cat_df = df_filtered[df_filtered["Category"] == category]
+                if cat_df.empty:
+                    continue
+
+                color = CATEGORY_COLORS.get(category, "gray")
+
+                for idx, row in cat_df.iterrows():
+                    flow_rates = row.get("flow_rates", [])
+                    if isinstance(flow_rates, str):
+                        try:
+                            import ast
+
+                            flow_rates = ast.literal_eval(flow_rates)
+                        except:
+                            flow_rates = []
+
+                    if flow_rates:
+                        start_time = row["datetime_start"]
+                        times = [
+                            start_time + timedelta(seconds=i)
+                            for i in range(len(flow_rates))
+                        ]
+                        custom_data = [[idx]] * len(flow_rates)
+
+                        fig.add_trace(
+                            go.Scatter(
+                                x=times,
+                                y=flow_rates,
+                                mode="lines",
+                                fill="tozeroy",
+                                name=category,
+                                line=dict(color=color, width=1),
+                                fillcolor=color,
+                                showlegend=False,
+                                customdata=custom_data,
+                                hovertemplate=f"{category}<br>Time: %{{x}}<br>Flow: %{{y:.2f}} L/min<br><i>Click for details</i><extra></extra>",
+                            )
+                        )
+
+            fig.update_layout(
+                xaxis=dict(
+                    range=[
+                        window_start.strftime("%Y-%m-%dT%H:%M:%S"),
+                        window_end.strftime("%Y-%m-%dT%H:%M:%S"),
+                    ],
+                    title="Time",
+                ),
+                yaxis=dict(title="Flow Rate (L/min)", rangemode="tozero"),
+                height=400,
+                margin=dict(l=50, r=20, t=30, b=40),
+                showlegend=False,
+                hovermode="closest",
+            )
+
+            # Convert updated events back to list of dicts
+            # Convert datetime columns to strings for JSON serialization
+            df_for_store = df_events.copy()
+            if "datetime_start" in df_for_store.columns:
+                df_for_store["datetime_start"] = df_for_store["datetime_start"].astype(
+                    str
+                )
+            if "datetime_end" in df_for_store.columns:
+                df_for_store["datetime_end"] = df_for_store["datetime_end"].astype(str)
+            updated_event_data = df_for_store.to_dict("records")
+
+            # Update the cache if we have a csv_path
+            if csv_path:
+                update_cached_data(csv_path, df_events)
+
+            print(
+                f"Reclassified event {event_idx} from {original_category} to {new_category}",
+                flush=True,
+            )
+
+            return updated_event_data, summary_data, event_list_data, False, fig
+
+        except Exception as e:
+            print(f"Error in reclassification: {e}", flush=True)
+            import traceback
+
+            traceback.print_exc()
+            return no_update, no_update, no_update, no_update, no_update

@@ -93,7 +93,7 @@ def load_classified_data(file_path):
 
 
 def calculate_summary_stats(df, categories=None):
-    """Calculate summary statistics for categories."""
+    """Calculate summary statistics for categories. Returns list of dicts for DataTable."""
     if df.empty:
         # Return empty summary with all categories
         summary_data = []
@@ -102,7 +102,7 @@ def calculate_summary_stats(df, categories=None):
         summary_data.append(
             {"Category": "Total", "Volume (L)": 0, "Percentage (%)": 100}
         )
-        return pd.DataFrame(summary_data)
+        return summary_data  # Return list, not DataFrame
 
     # Filter by categories if specified
     if categories:
@@ -122,19 +122,25 @@ def calculate_summary_stats(df, categories=None):
     if volume_col:
         for cat in ALL_CATEGORIES:
             cat_volume = df[df["Category"] == cat][volume_col].sum()
-            summary_data.append({"Category": cat, "Volume (L)": cat_volume})
+            summary_data.append({"Category": cat, "Volume (L)": round(cat_volume, 2)})
             total_volume += cat_volume
 
         # Calculate percentages
         for item in summary_data:
             if total_volume > 0:
-                item["Percentage (%)"] = (item["Volume (L)"] / total_volume) * 100
+                item["Percentage (%)"] = round(
+                    (item["Volume (L)"] / total_volume) * 100, 1
+                )
             else:
                 item["Percentage (%)"] = 0
 
         # Add total row
         summary_data.append(
-            {"Category": "Total", "Volume (L)": total_volume, "Percentage (%)": 100}
+            {
+                "Category": "Total",
+                "Volume (L)": round(total_volume, 2),
+                "Percentage (%)": 100,
+            }
         )
     else:
         for cat in ALL_CATEGORIES:
@@ -143,7 +149,7 @@ def calculate_summary_stats(df, categories=None):
             {"Category": "Total", "Volume (L)": 0, "Percentage (%)": 100}
         )
 
-    return pd.DataFrame(summary_data)
+    return summary_data  # Return list, not DataFrame
 
 
 def run_analysis_thread(csv_path):

@@ -24,12 +24,13 @@ def extract_events(df):
             c for c in df.columns if "date" in c.lower() or "time" in c.lower()
         ]
         if datetime_cols:
-            df["timestamp"] = pd.to_datetime(df[datetime_cols[0]])
+            # Use dayfirst=True for DD/MM/YYYY format (Australian date format)
+            df["timestamp"] = pd.to_datetime(df[datetime_cols[0]], dayfirst=True)
         else:
             raise ValueError("No timestamp column found in data")
 
     if "timestamp" not in df.columns:
-        df["timestamp"] = pd.to_datetime(df["datetime"])
+        df["timestamp"] = pd.to_datetime(df["datetime"], dayfirst=True)
 
     # Find flow rate column
     flow_col = None
