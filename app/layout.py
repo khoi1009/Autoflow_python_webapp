@@ -327,6 +327,48 @@ def create_layout():
                                                 color="danger",
                                                 className="w-100 mb-2",
                                             ),
+                                            # Navigation controls (moved from bottom row)
+                                            html.Hr(className="my-2"),
+                                            html.Label(
+                                                "Navigate to",
+                                                className="small text-muted",
+                                            ),
+                                            dbc.Select(
+                                                id="nav-category",
+                                                options=[
+                                                    {"label": c, "value": c}
+                                                    for c in ALL_CATEGORIES
+                                                ],
+                                                value="Shower",
+                                                size="sm",
+                                                className="mb-2",
+                                            ),
+                                            dbc.ButtonGroup(
+                                                [
+                                                    dbc.Button(
+                                                        "◀ Prev",
+                                                        id="prev-event-btn",
+                                                        color="secondary",
+                                                        size="sm",
+                                                    ),
+                                                    dbc.Button(
+                                                        "Next ▶",
+                                                        id="next-event-btn",
+                                                        color="secondary",
+                                                        size="sm",
+                                                    ),
+                                                ],
+                                                className="w-100 mb-2",
+                                            ),
+                                            # Display options button
+                                            dbc.Button(
+                                                "Display options",
+                                                id="display-options-btn",
+                                                color="info",
+                                                outline=True,
+                                                size="sm",
+                                                className="w-100 border",
+                                            ),
                                         ],
                                         className="p-2",
                                     )
@@ -395,63 +437,14 @@ def create_layout():
                         ],
                         width=10,
                         className="d-flex flex-column",
-                        style={"height": "calc(100vh - 380px)", "minHeight": "400px"},
+                        style={"height": "calc(100vh - 320px)", "minHeight": "400px"},
                     ),
                 ],
                 className="flex-grow-1 mb-2",
             ),
-            # --- Row 4: Bottom Navigation ---
+            # --- Row 4: Status Bar ---
             dbc.Row(
                 [
-                    dbc.Col(
-                        [
-                            dbc.Select(
-                                id="nav-category",
-                                options=[
-                                    {"label": c, "value": c} for c in ALL_CATEGORIES
-                                ],
-                                value="Shower",
-                                size="sm",
-                                style={"maxWidth": "150px"},
-                            ),
-                        ],
-                        width="auto",
-                    ),
-                    dbc.Col(
-                        [
-                            dbc.ButtonGroup(
-                                [
-                                    dbc.Button(
-                                        "Previous",
-                                        id="prev-event-btn",
-                                        color="secondary",
-                                        size="sm",
-                                    ),
-                                    dbc.Button(
-                                        "Next",
-                                        id="next-event-btn",
-                                        color="secondary",
-                                        size="sm",
-                                    ),
-                                ]
-                            )
-                        ],
-                        width="auto",
-                    ),
-                    dbc.Col(
-                        [
-                            dbc.Button(
-                                "Display options",
-                                id="display-options-btn",
-                                color="info",
-                                outline=True,
-                                size="sm",
-                                className="border",
-                            ),
-                        ],
-                        width="auto",
-                        className="text-center",
-                    ),
                     dbc.Col(width=True),  # Spacer
                     dbc.Col(
                         [
